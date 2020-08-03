@@ -1,4 +1,7 @@
-﻿function Create-DefaultAudioChannelMap{
+﻿function Create-xLiveDefaultChannelMap{
+    param(
+        [switch]$AsString
+    )
     #Default channel map YAML
 	$ChannelMapYaml = @'
 tracks:
@@ -125,58 +128,113 @@ tracks:
 - track: Mono31
   channels:
   - 31
-  enable: false
 
 - track: Mono32
   channels:
   - 32
-  enable: false
+  enable: true
 '@
-	
-	Write-Output $ChannelMap
+	if($AsString){
+	    Write-Output $ChannelMapYaml
+    }
+    else{
+        $temp = $ChannelMapYaml | ConvertFrom-Yaml
+        Write-Output $temp
+    }
 }
 
-function Out-AudioChannels{
-	[CmdletBinding()]
+function Out-xLiveAudioTracks{
+	[CmdletBinding(DefaultParametersetName="ChannelMapObject")]
 	param(
-		[Parameter(Position=0,Mandatory=$false,ValueFromPipeline=$true,ValueFromPipelineByPropertyName=$true)]
-		[string]$InputFiles = 'C:\Users\sam.webster\Documents\Cubase Projects\Rain - Fox and Hound Recordings\Import\*.wav',
+		[Parameter(Position=0,Mandatory=$true,ValueFromPipeline=$true,ValueFromPipelineByPropertyName=$true)]
+        [ValidateScript({
+            $inputDir = [System.IO.Path]::GetDirectoryName($_)
+            if( -Not ($inputDir | Test-Path) ){
+                throw "Path for parameter 'InputFilePath' '$inputDir' not found"
+            }
+            if($_ -notmatch "(\.wav)"){
+                throw "Path for parameter 'InputFilePath' must be of type 'WAV'. This can be a wildcard e.g. '*.wav'"
+            }
+            $files = Get-ChildItem -Path $_ | Where-Object -FilterScript {$_.Name -match '^[0-9]{8}\.wav'}
+            if(-Not ($files -and $files.count -gt 0) ){
+                throw "Path for parameter 'InputFilePath' does not include any files that match the expected XLive name format e.g. '00000001.wav'"
+            }
+            return $true
+        })]
+		[string]$InputFilePath,
+
+		[Parameter(Position=0,Mandatory=$true,ValueFromPipelineByPropertyName=$true)]
+        [ValidateScript({
+           if( -Not ($_ | Test-Path) ){
+                throw "'$_' not found."
+            }
+            if(-Not ($_ | Test-Path -PathType Container) ){
+                throw "The 'OutputPath' parameter must point to a folder. File paths are not allowed."
+            }
+            return $true
+        })]
+		[System.IO.FileInfo]$OutputPath = 'C:\temp\xLiveImport',
+		
+		[Parameter(ParameterSetName='ChannelMapObject',Position=0,Mandatory=$false,ValueFromPipelineByPropertyName=$true)]
+		[object]$ChannelMap = $(Create-xLiveDefaultChannelMap),
 
 		[Parameter(Position=0,Mandatory=$false,ValueFromPipelineByPropertyName=$true)]
-		[string]$OutputPath = 'C:\Users\sam.webster\Documents\Cubase Projects\Rain - Fox and Hound Recordings\Import\output',
+		[string]$WorkingDirectory = 'c:\temp\xlivetemp',
 
 		[Parameter(Position=0,Mandatory=$false,ValueFromPipelineByPropertyName=$true)]
-		[object]$ChannelMapFile,
+		[string]$InputFileFilter = '*.wav',
 		
 		[Parameter(Position=0,Mandatory=$false,ValueFromPipelineByPropertyName=$true)]
-		[object]$ChannelMap = $(Get-DefaultAudioChannelMap),
-
-		[Parameter(Position=0,Mandatory=$false,ValueFromPipelineByPropertyName=$true)]
-		[string]$WorkingDirectory = 'C:\Users\sam.webster\Documents\Cubase Projects\Rain - Fox and Hound Recordings\Import\output',
-		
-		[Parameter(Position=0,Mandatory=$false,ValueFromPipelineByPropertyName=$true)]
-		[string]$ffmpegPath = 'C:\Users\sam.webster\Downloads\ffmpeg-20200619-2f59946-win64-static\ffmpeg-20200619-2f59946-win64-static\bin\ffmpeg.exe',
+        [ValidateScript({
+            if( -Not ($_ | Test-Path) ){
+                throw "'$_' not found."
+            }
+            if(-Not ($_ | Test-Path -PathType Leaf) ){
+                throw "The 'ffmpegPath' parameter must point to the ffmpeg.exe file. Folder paths are not allowed."
+            }
+            return $true
+        })]
+		[System.IO.FileInfo]$ffmpegPath = $(Join-Path $PSScriptRoot 'ffmpeg-20200619-2f59946-win64-static\bin\ffmpeg.exe'),
 		
 		[Parameter(Position=0,Mandatory=$false,ValueFromPipelineByPropertyName=$true)]
 		[switch]$Force
 	)
 	begin{
-        if(!(Test-Path $ffmpegPath)){
-			Write-Error "FFMpeg path '$ffmpegPath' not found." -ErrorAction Stop
-		}
-		if(!(Test-Path $([System.IO.Path]::GetDirectoryName($InputFiles)))){
-			Write-Error "Input folder '$([System.IO.Path]::GetDirectoryName($Input))' not found." -ErrorAction Stop
-		}
-		if(!(Test-Path $OutputPath)){
-			Write-Error "Output folder '$OutputPath' not found." -ErrorAction Stop
-		}
-
-
-        $ChannelMapObject = $ChannelMap
-
+        #Get Channel Map
         if($ChannelMap -is [string]){
-            $ChannelMapObject = $ChannelMap | ConvertFrom-Yaml
+            #Could be YAML or file path
+            try{
+                #Is it a file path?
+                [System.IO.FileInfo]$tPath = $ChannelMap
+                if( -Not ($tPath | Test-Path) ){
+                    throw "'$tPath' not found."
+                }
+                $rawYAML = Get-Content -LiteralPath $tPath -Raw
+            }
+            catch{
+                #Must be YAML?
+                $rawYAML = $ChannelMap
+            }
+
+            if($rawYAML){   
+                try{
+                    Write-Verbose "Attempting to convert YAML string to object."
+                    $ChannelMapObject = $rawYAML | ConvertFrom-Yaml
+                }
+                catch{
+                    
+                }
+            }
+            else{
+                throw "Unable to read channel map data from string input."
+            }
         }
+        elseif($ChannelMap -is [hashtable]){
+            $ChannelMapObject = $ChannelMap
+        }
+        else{
+            throw "Parameter 'ChannelMap' is not of the expected type."
+        }   
 
         if(!$ChannelMapObject -or !$ChannelMapObject.tracks){
             Write-Error "Channel map not in correct format." -ErrorAction Stop
@@ -184,7 +242,7 @@ function Out-AudioChannels{
 
 	}
 	process{
-		$Files = Get-ChildItem -Path $InputFiles
+		$Files = Get-ChildItem -Path $InputFilePath
 
         $FileNameList = @{}
 		foreach($FileName in $Files | Sort-Object | Select-Object -ExpandProperty FullName){
@@ -229,16 +287,12 @@ function Out-AudioChannels{
 
 			    Write-Verbose "Execute: $ffmpegPath $fullCommand"
 			    Start-Process -FilePath $ffmpegPath -ArgumentList $fullCommand -WorkingDirectory $OutputPath -Wait -PassThru
-			
-			    #Write-Host $s
             }
 		}
 
         foreach($trackName in $FileNameList.Keys){
-            
-
             $outFile = [string]::Format("{0}.wav", $trackName)
-            $outPath = [System.IO.Path]::GetDirectoryName($InputFiles)
+            $outPath = [System.IO.Path]::GetDirectoryName($InputFilePath)
             $finalFulloutFilePath = Join-Path $outPath $outFile
 
             $outConcatFile = [string]::Format("{0}.txt", $trackName)
@@ -262,23 +316,12 @@ function Out-AudioChannels{
                 }
 
                 $fullConcatCommandParts = [string]::Join("`r`n", $concatParts)
-
                 
                 Set-Content -Path $concatTempTextFile -Value $fullConcatCommandParts -Force
-               
-
-                #$fullConcatCommandParts = [string]::Join("|", $concatParts)
-		
-			    #$fullConcatCommand = [string]::Format("-i `"concat:{0}`" -c copy '{1}'", $fullConcatCommandParts, $finalFulloutFilePath)
                 $fullConcatCommand = [string]::Format("-f concat -safe 0 -i {0} -c copy `"{1}`" -y", $outConcatFile, $finalFulloutFilePath)
-
-                #ffmpeg -f concat -safe 0 -i mylist.txt -c copy output.wav
 
 			    Write-Verbose "Execute: $ffmpegPath $fullConcatCommand"
 			    $p = Start-Process -FilePath $ffmpegPath -ArgumentList $fullConcatCommand -WorkingDirectory $OutputPath -Wait -PassThru
-
-                   #ffmpeg -i "concat:input1.ts|input2.ts|input3.ts" -c copy output.ts
-                #Write-Verbose $p
 
             }
 
@@ -287,11 +330,9 @@ function Out-AudioChannels{
         }
         
 
-		#>C:\Users\sam.webster\Downloads\ffmpeg-20200619-2f59946-win64-static\ffmpeg-20200619-2f59946-win64-static\bin\ffmpeg.exe -i 00000001.WAV -map_channel 0.0.7 lead.wav -map_channel 0.0.12 -map_channel 0.0.13 keys.wav -map_channel 0.0.0 pom.wav
+		#ffmpeg.exe -i 00000001.WAV -map_channel 0.0.7 lead.wav -map_channel 0.0.12 -map_channel 0.0.13 keys.wav -map_channel 0.0.0 pom.wav
 
 		#ffmpeg -i multichannelinputfile.mov -map_channel 0.1.0 ch0.wav -map_channel 0.1.1 ch1.wav -map_channel 0.1.2 ch2.wav -map_channel 0.1.3 ch3.wav
 	}
 
 }
-
-#Out-AudioChannels -InputFiles 'C:\Users\sam.webster\Documents\Cubase Projects\Rain - Fox and Hound Recordings\Import\00000002.WAV' -ffmpegPath 'C:\Users\sam.webster\Downloads\ffmpeg-20200619-2f59946-win64-static\ffmpeg-20200619-2f59946-win64-static\bin\ffmpeg.exe'
