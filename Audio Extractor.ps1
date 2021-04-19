@@ -144,9 +144,9 @@ tracks:
 }
 
 function Out-xLiveAudioTracks{
-	[CmdletBinding(DefaultParametersetName="ChannelMapObject")]
+	[CmdletBinding()]
 	param(
-		[Parameter(Position=0,Mandatory=$true,ValueFromPipeline=$true,ValueFromPipelineByPropertyName=$true)]
+	    [Parameter(Position=0,Mandatory=$true,ValueFromPipelineByPropertyName=$true)]
         [ValidateScript({
             $inputDir = [System.IO.Path]::GetDirectoryName($_)
             if( -Not ($inputDir | Test-Path) ){
@@ -165,25 +165,41 @@ function Out-xLiveAudioTracks{
 
 		[Parameter(Position=0,Mandatory=$true,ValueFromPipelineByPropertyName=$true)]
         [ValidateScript({
-           if( -Not ($_ | Test-Path) ){
-                throw "'$_' not found."
+            if( -Not ($_ | Test-Path) ){
+                #throw "'$_' not found."
+                [System.IO.Directory]::CreateDirectory($_)
             }
             if(-Not ($_ | Test-Path -PathType Container) ){
                 throw "The 'OutputPath' parameter must point to a folder. File paths are not allowed."
             }
             return $true
         })]
-		[System.IO.FileInfo]$OutputPath = 'C:\temp\xLiveImport',
-		
-		[Parameter(ParameterSetName='ChannelMapObject',Position=0,Mandatory=$false,ValueFromPipelineByPropertyName=$true)]
+		[System.IO.FileInfo]$OutputPath = "$Env:Temp\xLiveImport",
+
+        [Parameter(Position=0,Mandatory=$false,ValueFromPipelineByPropertyName=$true)]
+        [ValidateScript({
+            if(!$_){
+                throw "'ChannelMap' cannot be empty. Provide a Channel map yaml file path or object."
+            }
+            return $true
+        })]
 		[object]$ChannelMap = $(Create-xLiveDefaultChannelMap),
 
-		[Parameter(Position=0,Mandatory=$false,ValueFromPipelineByPropertyName=$true)]
-		[string]$WorkingDirectory = 'c:\temp\xlivetemp',
+        [Parameter(Position=0,Mandatory=$false,ValueFromPipelineByPropertyName=$true)]
+        [ValidateScript({
+            if( -Not ($_ | Test-Path) ){
+                [System.IO.Directory]::CreateDirectory($_)
+            }
+            if(-Not ($_ | Test-Path -PathType Container) ){
+                throw "The 'WorkingDirectory' parameter must point to a folder. File paths are not allowed."
+            }
+            return $true
+        })]
+		[string]$WorkingDirectory = "$Env:Temp\xlivetemp",
 
-		[Parameter(Position=0,Mandatory=$false,ValueFromPipelineByPropertyName=$true)]
-		[string]$InputFileFilter = '*.wav',
-		
+		#[Parameter(Position=0,Mandatory=$false,ValueFromPipelineByPropertyName=$true)]
+		#[string]$InputFileFilter = '*.wav',
+
 		[Parameter(Position=0,Mandatory=$false,ValueFromPipelineByPropertyName=$true)]
         [ValidateScript({
             if( -Not ($_ | Test-Path) ){
@@ -194,12 +210,27 @@ function Out-xLiveAudioTracks{
             }
             return $true
         })]
-		[System.IO.FileInfo]$ffmpegPath = $(Join-Path $PSScriptRoot 'ffmpeg-20200619-2f59946-win64-static\bin\ffmpeg.exe'),
-		
+		[System.IO.FileInfo]$FFMpegPath = $(Join-Path $PSScriptRoot 'ffmpeg-20200619-2f59946-win64-static\bin\ffmpeg.exe'),
+
 		[Parameter(Position=0,Mandatory=$false,ValueFromPipelineByPropertyName=$true)]
-		[switch]$Force
+        [switch]$Force,
+
+        [Parameter(Position=0,Mandatory=$false,ValueFromPipelineByPropertyName=$true)]
+		[switch]$NoCleanup,
+
+        [Parameter(Position=0,Mandatory=$false,ValueFromPipelineByPropertyName=$true)]
+		[int]$MaxFFMpegProcesses = 8,
+
+        [Parameter(Position=0,Mandatory=$false,ValueFromPipelineByPropertyName=$true)]
+		[switch]$TestRun
 	)
 	begin{
+
+
+        if( -Not ($WorkingDirectory | Test-Path) ){
+            [System.IO.Directory]::CreateDirectory($WorkingDirectory)
+        }
+
         #Get Channel Map
         if($ChannelMap -is [string]){
             #Could be YAML or file path
@@ -216,13 +247,13 @@ function Out-xLiveAudioTracks{
                 $rawYAML = $ChannelMap
             }
 
-            if($rawYAML){   
+            if($rawYAML){
                 try{
                     Write-Verbose "Attempting to convert YAML string to object."
                     $ChannelMapObject = $rawYAML | ConvertFrom-Yaml
                 }
                 catch{
-                    
+
                 }
             }
             else{
@@ -234,7 +265,7 @@ function Out-xLiveAudioTracks{
         }
         else{
             throw "Parameter 'ChannelMap' is not of the expected type."
-        }   
+        }
 
         if(!$ChannelMapObject -or !$ChannelMapObject.tracks){
             Write-Error "Channel map not in correct format." -ErrorAction Stop
@@ -245,9 +276,10 @@ function Out-xLiveAudioTracks{
 		$Files = Get-ChildItem -Path $InputFilePath
 
         $FileNameList = @{}
+        $procList = @()
 		foreach($FileName in $Files | Sort-Object | Select-Object -ExpandProperty FullName){
 			$OutFilenamePrefix = [System.IO.Path]::GetFileNameWithoutExtension($FileName).Replace(".", "_")
-            
+
 			$CommandLineParts = @()
 			#Build Command Line
 			foreach($Channel in $ChannelMapObject.tracks){
@@ -259,52 +291,64 @@ function Out-xLiveAudioTracks{
                     else{
                         $FileNameList.$trackFileName += $OutFilenamePrefix
                     }
-                    
+
 					$outFile = [string]::Format("{0}.{1}.wav", $OutFilenamePrefix, $trackFileName)
-					$fulloutFilePath = Join-Path $OutputPath $outFile
+					$fulloutFilePath = Join-Path $WorkingDirectory $outFile
 					if($Force -or !(Test-Path $fulloutFilePath)){
-				
+
 						$commandSnippet = @()
 						foreach($audioChannel in $Channel.channels | Sort-Object){
 							$actualChannel = $audioChannel - 1
 							$commandSnippet += [string]::Format("-map_channel 0.0.{0}", $actualChannel)
 						}
-						
+
 						$channelcommands = [string]::Join(" ", $commandSnippet)
-						
-						
+
+
 						$channelCommand = [string]::Format("{0} {1} {2}", $channelcommands, "-acodec pcm_s32le", $outFile)
-						Write-Verbose $channelCommand
-						
+						Write-Debug $channelCommand
+
 						$CommandLineParts += $channelCommand
 					}
 				}
 			}
             if($CommandLineParts -and $CommandLineParts.Count -gt 0){
-			    $fullCommandParts = [string]::Join(" ", $CommandLineParts)	
-		
+			    $fullCommandParts = [string]::Join(" ", $CommandLineParts)
+
 			    $fullCommand = [string]::Format('-i "{0}" {1}', $FileName, $fullCommandParts)
 
-			    Write-Verbose "Execute: $ffmpegPath $fullCommand"
-			    Start-Process -FilePath $ffmpegPath -ArgumentList $fullCommand -WorkingDirectory $OutputPath -Wait -PassThru
+			    Write-Verbose "Execute: $FFMpegPath $fullCommand"
+                if($TestRun){
+                    Write-Host "Execute: $FFMpegPath $fullCommand"
+                }
+                else{
+                    if($procList.Count -ge $MaxFFMpegProcesses){
+                        Write-Host "Maximum prceoWaiting for ffmpeg processes to complete"
+                        $procList | Wait-Process
+                    }
+                    $procList += Start-Process -FilePath $FFMpegPath -ArgumentList $fullCommand -WorkingDirectory $WorkingDirectory -PassThru
+                }
+			    
             }
 		}
+        Write-Host "Waiting for ffmpeg processes to complete"
+        $procList | Wait-Process
 
+        $procList = @()
         foreach($trackName in $FileNameList.Keys){
             $outFile = [string]::Format("{0}.wav", $trackName)
-            $outPath = [System.IO.Path]::GetDirectoryName($InputFilePath)
-            $finalFulloutFilePath = Join-Path $outPath $outFile
+            $finalFulloutFilePath = Join-Path $OutputPath $outFile
 
             $outConcatFile = [string]::Format("{0}.txt", $trackName)
-            $concatTempTextFile = Join-Path $OutputPath $outConcatFile
+            $concatTempTextFile = Join-Path $WorkingDirectory $outConcatFile
             if($Force -or !(Test-Path $finalFulloutFilePath)){
 
                 $concatParts = @()
-                
+
                 foreach($trackParts in $FileNameList.$trackName | Sort-Object){
                     $outFile = [string]::Format("{0}.{1}.wav", $trackParts, $trackName)
-                    $fullinputFilePath = Join-Path $OutputPath $outFile
-                    if((Test-Path $fullinputFilePath)){
+                    $fullinputFilePath = Join-Path $WorkingDirectory $outFile
+                    if((Test-Path $fullinputFilePath) -or $TestRun){
                         $concatParts += "file '$outFile'"
 
                     }
@@ -316,19 +360,24 @@ function Out-xLiveAudioTracks{
                 }
 
                 $fullConcatCommandParts = [string]::Join("`r`n", $concatParts)
-                
+
                 Set-Content -Path $concatTempTextFile -Value $fullConcatCommandParts -Force
                 $fullConcatCommand = [string]::Format("-f concat -safe 0 -i {0} -c copy `"{1}`" -y", $outConcatFile, $finalFulloutFilePath)
 
-			    Write-Verbose "Execute: $ffmpegPath $fullConcatCommand"
-			    $p = Start-Process -FilePath $ffmpegPath -ArgumentList $fullConcatCommand -WorkingDirectory $OutputPath -Wait -PassThru
+			    Write-Verbose "Execute: $FFMpegPath $fullConcatCommand"
+                if($TestRun){
+                    Write-Host "Execute: $FFMpegPath $fullConcatCommand"
+                }
+                else{
+			        $procList = Start-Process -FilePath $FFMpegPath -ArgumentList $fullConcatCommand -WorkingDirectory $WorkingDirectory -PassThru -Wait:$SingleThread
+                }
 
             }
 
-
-
         }
-        
+        Write-Host "Waiting for ffmpeg processes to complete"
+        $procList | Wait-Process
+
 
 		#ffmpeg.exe -i 00000001.WAV -map_channel 0.0.7 lead.wav -map_channel 0.0.12 -map_channel 0.0.13 keys.wav -map_channel 0.0.0 pom.wav
 
